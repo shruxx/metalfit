@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metalfit"
+version = "0.1.0"
+description = "Fit GGUF models onto an Apple Silicon GPU, and keep one address in front of them"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "shruxx" }]
+keywords = ["llama.cpp", "gguf", "apple-silicon", "metal", "llm"]
+classifiers = [
+  "Environment :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.scripts]
+metalfit = "metalfit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/shruxx/metalfit"
+
+[tool.setuptools]
+packages = ["metalfit"]
+
+[tool.setuptools.package-data]
+metalfit = ["web/*"]
