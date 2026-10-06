@@ -53,6 +53,14 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--models", help="where the .gguf files are")
     sv.add_argument("--port", type=int, default=DEFAULT_PORT)
     sv.add_argument("-c", "--ctx", type=int, default=0, help="context to prefer (default: the largest that fits)")
+    sv.add_argument("--gpu-layers", type=int, metavar="N",
+                    help="put only N layers on the GPU even when the whole model would fit. The GPU's share is "
+                         "wired and macOS cannot page it out; the rest are mapped file pages it can drop, so "
+                         "this is how a large model shares a Mac you also work on")
+    sv.add_argument("--keep-free-gib", type=float, default=0.0, metavar="N",
+                    help="leave N GB of the Mac for everything else, and put only as many layers on the GPU "
+                         "as that allows. What the GPU holds is wired and cannot be paged out; the rest are "
+                         "mapped file pages macOS drops under pressure")
     sv.add_argument("--keep-alive", type=float, default=600.0, metavar="SECONDS",
                     help="give the memory back after this long without a request (0 = never; default 600). "
                          "A model on the GPU whole wires nearly all of it, and wired memory cannot be paged "
@@ -99,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     if not server:
         print("llama-server not found; pass --llama-server <path>", file=sys.stderr)
         return 1
-    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive)
+    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive, a.gpu_layers, a.keep_free_gib)
     return 0
 
 

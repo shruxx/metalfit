@@ -89,6 +89,18 @@ metalfit serve --models ~/models        # the page and the API on 127.0.0.1:8099
 running - streamed replies included. Switching is one llama-server stopping and another starting, which for a
 35 GiB model that maps takes about 13 seconds.
 
+**It can leave the Mac usable while the model runs.** What the GPU holds is wired and macOS cannot page it out,
+so a model held whole pushes browsers and editors into swap; the layers left off the GPU are mapped file pages it
+simply drops under pressure. `--keep-free-gib N` puts on only as many layers as leaves N GB alone. Kolibri-1
+Q3_K_M (34.9 GiB) on a 48 GB M5 Pro, `-c 65536`, measured through the server:
+
+| GPU layers | wired | free for everything else | tok/s |
+|---:|---:|---:|---:|
+| 51 (all) | 40.2 GiB | 7.8 GB | 62.0 |
+| 36 | 29.5 GiB | 18.5 GB | 39.1 |
+| 26 (`--keep-free-gib 24`) | 22.5 GiB | 25.5 GB | 33.8 |
+| 16 | 15.5 GiB | 32.5 GB | 24.3 |
+
 **It gives the memory back when you stop using it.** A model on the GPU whole wires nearly all of it - 39.8 GiB
 of a 48 GB Mac for a 35 GiB model - and wired memory cannot be paged out, so while it sits there unused every
 browser tab and editor on the machine goes to swap instead. After ten idle minutes (`--keep-alive`, 0 to switch

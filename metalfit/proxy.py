@@ -34,6 +34,9 @@ class State:
         self.llama_server = llama_server
         self.default_ctx = default_ctx
         self.keep_alive = keep_alive
+        self.gpu_layers: int | None = None      # None = all of it when it fits; a number forces a split
+        self.keep_free: int = 0                 # bytes of the machine to leave alone; picks the layer count
+        self.ram = fit.physical_memory()
         self.working_set = fit.working_set(llama_server)
         self.engine: eng.Engine | None = None
         self.lock = threading.Lock()
@@ -107,11 +110,14 @@ class State:
             } for m in self.models()],
         }
 
-    def load(self, path: str, n_ctx: int | None = None) -> dict:
+    def load(self, path: str, n_ctx: int | None = None, gpu_layers: int | None = None) -> dict:
         with self.lock:
             m = fit.inspect(path)
             ctx = n_ctx or self.best_ctx(m)
-            plan = fit.plan(m, ctx, self.working_set)
+            n = gpu_layers if gpu_layers is not None else self.gpu_layers
+            if n is None and self.keep_free:
+                n = fit.layers_for_free(m, ctx, self.keep_free, self.ram, self.working_set)
+            plan = fit.plan(m, ctx, self.working_set, gpu_layers=n)
             self.busy = f"stopping the model that is loaded"
             if self.engine:
                 self.engine.stop()
@@ -260,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/load":
             b = self._body()
             try:
-                return self._json(200, self.state.load(b["path"], b.get("n_ctx")))
+                return self._json(200, self.state.load(b["path"], b.get("n_ctx"), b.get("gpu_layers")))
             except KeyError:
                 return self._json(400, {"error": "which model? pass a path"})
             except Exception as exc:
@@ -273,14 +279,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(models_dir: Path, llama_server: Path, port: int = 8099, default_ctx: int = 0,
-          keep_alive: float = 600.0) -> None:
+          keep_alive: float = 600.0, gpu_layers: int | None = None, keep_free_gib: float = 0.0) -> None:
     state = State(models_dir, llama_server, default_ctx, keep_alive)
+    state.gpu_layers = gpu_layers
+    state.keep_free = int(keep_free_gib * fit.GIB)
     handler = type("BoundHandler", (Handler,), {"state": state})
     httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
     n = len(state.models())
     print(f"[metalfit] {n} model{'s' if n != 1 else ''} in {models_dir}")
     print(f"[metalfit] Metal working set {state.working_set / fit.GIB:.2f} GiB")
     print(f"[metalfit] open http://127.0.0.1:{port}/   API: http://127.0.0.1:{port}/v1")
+    if keep_free_gib:
+        print(f"[metalfit] leaving {keep_free_gib:.0f} GB of the machine free: only as many layers go on the "
+              f"GPU as that allows")
     print(f"[metalfit] " + (f"the model is unloaded after {keep_alive / 60:.0f} idle minutes"
                             if keep_alive > 0 else "the model stays loaded until you stop it"))
 

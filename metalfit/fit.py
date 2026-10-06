@@ -40,6 +40,11 @@ KV_BPE = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 34 / 32, "q5_1": 24 / 32,
 # and 1.64 GiB, and 1.2 also leaves Kolibri Q3_K_M (34.9 GiB, 0.69 GiB of KV at -c 65536) fitting, as measured.
 COMPUTE_RESERVE = int(1.2 * GIB)
 
+# What macOS and its apps have wired before any model loads.  Measured on an idle 48 GB M5 Pro with a browser
+# and an editor open: 4.2 - 4.7 GiB.  It is subtracted when working out how many layers leave a wanted amount
+# of the machine free, because that memory was never available to begin with.
+SYSTEM_WIRED = int(4.3 * GIB)
+
 
 @dataclass(frozen=True)
 class Model:
@@ -57,6 +62,8 @@ class Model:
     k_len: int
     v_len: int
     ssm_bytes: int             # the recurrent state of a hybrid model's non-attention layers, per sequence
+    block_bytes: tuple[int, ...] = ()   # each transformer block's weights, in file order
+    head_bytes: int = 0                 # the output head, which -ngl counts as one more layer
 
     @property
     def n_gpu_layers_all(self) -> int:
@@ -82,13 +89,20 @@ def inspect(path: str | Path) -> Model:
     shards = gguf.shards(path)
     first = gguf.read(shards[0])
 
-    file_bytes = lazy = 0
-    for s in shards:
-        g = first if s == shards[0] else gguf.read(s)
+    file_bytes = lazy = head = 0
+    blocks: dict[int, int] = {}
+    for sh in shards:
+        g = first if sh == shards[0] else gguf.read(sh)
         for t in g.tensors:
             file_bytes += t.nbytes
             if t.nbytes > LAZY_MIN and t.name.startswith(LAZY_NAMES):
                 lazy += t.nbytes
+                continue
+            b = re.match(r"blk\.(\d+)\.", t.name)
+            if b:
+                blocks[int(b.group(1))] = blocks.get(int(b.group(1)), 0) + t.nbytes
+            elif t.name.startswith("output"):
+                head += t.nbytes
 
     n_layers = _int(first.key("block_count"))
     n_head_kv = _int(first.key("attention.head_count_kv"))
@@ -121,7 +135,8 @@ def inspect(path: str | Path) -> Model:
     return Model(path=Path(shards[0]), shards=tuple(shards), arch=first.arch, n_layers=n_layers,
                  file_bytes=file_bytes, lazy_bytes=lazy, must_hold=file_bytes - lazy,
                  kv_layers=kv_layers, swa_layers=swa_layers, swa_window=window,
-                 n_head_kv=n_head_kv, k_len=k_len, v_len=v_len, ssm_bytes=ssm_bytes)
+                 n_head_kv=n_head_kv, k_len=k_len, v_len=v_len, ssm_bytes=ssm_bytes,
+                 block_bytes=tuple(blocks[i] for i in sorted(blocks)), head_bytes=head)
 
 
 def kv_bytes(m: Model, n_ctx: int, ctk: str = "q8_0", ctv: str = "q8_0") -> int:
@@ -129,6 +144,14 @@ def kv_bytes(m: Model, n_ctx: int, ctk: str = "q8_0", ctv: str = "q8_0") -> int:
     per_tok = m.n_head_kv * (m.k_len * KV_BPE.get(ctk, 2.0) + m.v_len * KV_BPE.get(ctv, 2.0))
     swa_ctx = min(n_ctx, m.swa_window) if m.swa_window else n_ctx
     return int(per_tok * (m.kv_layers * n_ctx + m.swa_layers * swa_ctx)) + m.ssm_bytes
+
+
+def physical_memory() -> int:
+    """The Mac's memory in bytes (hw.memsize), 0 when it cannot be read."""
+    try:
+        return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0
 
 
 def working_set(llama_server: str | Path | None = None) -> int:
@@ -155,6 +178,31 @@ def working_set(llama_server: str | Path | None = None) -> int:
         return int(ram * 0.75)
     except (OSError, subprocess.SubprocessError, ValueError):
         return 0
+
+
+def layers_for_free(m: Model, n_ctx: int, want_free: int, ram: int, ws: int,
+                    ctk: str = "q8_0", ctv: str = "q8_0") -> int:
+    """The most GPU layers that still leave `want_free` bytes of the machine for everything else.
+
+    Measured on a 48 GB M5 Pro with Kolibri-1 Q3_K_M (34.9 GiB): 51 layers wire 40.2 GiB and leave 7.8 GB at
+    62.0 tok/s, 36 wire 29.5 and leave 18.5 at 39.1, 25 wire 21.7 and leave 26.3 at 32.2, 16 wire 15.5 and
+    leave 32.5 at 24.3.  Layers left off the GPU are mapped file pages macOS can drop under pressure, which is
+    why this trade is worth making on a Mac you also work on."""
+    budget = min(ws, max(ram - want_free - SYSTEM_WIRED, 0)) - kv_bytes(m, n_ctx, ctk, ctv) - COMPUTE_RESERVE
+    return layers_for_budget(m, max(budget, 0))
+
+
+def layers_for_budget(m: Model, weight_budget: int) -> int:
+    """How many layers fit `weight_budget` of wired GPU memory.  llama.cpp's -ngl N puts the output head and
+    the last N-1 blocks on the GPU, so this counts from the end."""
+    if not m.block_bytes or m.head_bytes > weight_budget:
+        return 0
+    used, n = m.head_bytes, 1
+    for b in reversed(m.block_bytes):
+        if used + b > weight_budget:
+            break
+        used, n = used + b, n + 1
+    return n
 
 
 CONTEXTS = (2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 393216, 524288)
@@ -186,8 +234,13 @@ class Plan:
                 + (f", {short:.1f} GiB too much" if short > 0 else ""))
 
 
-def plan(m: Model, n_ctx: int, ws: int | None = None, ctk: str = "q8_0", ctv: str = "q8_0") -> Plan:
-    """Whether `m` fits the GPU whole at `n_ctx`, and the largest context at which it would."""
+def plan(m: Model, n_ctx: int, ws: int | None = None, ctk: str = "q8_0", ctv: str = "q8_0",
+         gpu_layers: int | None = None) -> Plan:
+    """Whether `m` fits the GPU whole at `n_ctx`, and the largest context at which it would.
+
+    `gpu_layers` forces a count instead.  That is worth doing on a Mac you also work on: the GPU's share is
+    wired and macOS cannot page it out, so a model held whole pushes everything else into swap, while the
+    layers left to the CPU are mapped file pages the system can simply drop and read again."""
     ws = working_set() if ws is None else ws
     kv = kv_bytes(m, n_ctx, ctk, ctv)
     needed = m.must_hold + kv + COMPUTE_RESERVE
@@ -196,5 +249,10 @@ def plan(m: Model, n_ctx: int, ws: int | None = None, ctk: str = "q8_0", ctv: st
     for c in CONTEXTS:
         if m.must_hold + kv_bytes(m, c, ctk, ctv) + COMPUTE_RESERVE <= ws:
             best = c
+    if gpu_layers is not None:
+        n = max(0, min(gpu_layers, m.n_gpu_layers_all))
+        return Plan(model=m, working_set=ws, n_ctx=n_ctx, kv=kv, needed=needed,
+                    fits_whole=(n >= m.n_gpu_layers_all and fits), max_ctx=best, n_gpu_layers=n,
+                    headroom=ws - needed)
     return Plan(model=m, working_set=ws, n_ctx=n_ctx, kv=kv, needed=needed, fits_whole=fits, max_ctx=best,
                 n_gpu_layers=m.n_gpu_layers_all if fits else 0, headroom=ws - needed)

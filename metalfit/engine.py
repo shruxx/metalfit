@@ -75,11 +75,12 @@ def command(llama_server: Path, plan: fit.Plan, port: int, threads: int | None =
            "--port", str(port), "--host", "127.0.0.1", "--parallel", "1",
            "--threads", str(threads or performance_cores()),
            "-ctk", ctk, "-ctv", ctv]
-    if plan.fits_whole:
+    if plan.n_gpu_layers:
         cmd += ["--fit", "off", "-ngl", str(plan.n_gpu_layers)]
-    else:
-        # the weights do not fit, so the CPU side reads experts from the file: repacking would copy them into
-        # memory macOS can only swap, where the mapping lets it drop them and read them again
+    if not plan.fits_whole:
+        # part of the model is on the CPU side and read from the file: repacking would copy those weights into
+        # memory macOS can only swap, where the mapping lets it drop them and read them again.  That is the
+        # whole point of leaving layers off the GPU on a Mac you also work on.
         cmd += ["--no-repack"]
     return cmd
 
