@@ -129,6 +129,10 @@ class State:
             except Exception as exc:
                 self.busy = ""
                 raise RuntimeError(f"{m.path.name} did not start: {exc}") from exc
+            self.busy = f"warming {m.path.name} up"
+            took = e.warm()
+            if took > 5:
+                print(f"[metalfit] warm-up took {took:.0f} s - that is what the first reply would have cost")
             self.engine, self.busy, self.last_used = e, "", time.monotonic()
             self.last_plan = plan
             return self.describe()

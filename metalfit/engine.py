@@ -1,6 +1,7 @@
 """Starting and stopping one llama-server, with the flags a model needs on this Mac."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -111,6 +112,24 @@ class Engine:
             time.sleep(0.3)
         self.stop()
         raise TimeoutError(f"llama-server did not answer within {timeout:.0f} s")
+
+    def warm(self, timeout: float = 1800.0) -> float:
+        """Generate one token, so the first real request does not pay for the model being cold.
+
+        With layers left to the CPU, llama.cpp maps their weights and reads them only when inference first
+        touches them.  Measured on a 48 GB M5 Pro, Kolibri-1 Q3_K_M at 26 of 51 layers: the first reply took
+        11.4 s with the file still in the page cache and 143 s with it cold, against ~1 s for every reply
+        after.  A chat app times out long before that, so the wait belongs in the load, where something is
+        visibly loading."""
+        body = json.dumps({"prompt": "\\n", "n_predict": 1, "temperature": 0}).encode()
+        t0 = time.monotonic()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{self.port}/completion", data=body,
+                                         headers={"Content-Type": "application/json"})
+            urllib.request.urlopen(req, timeout=timeout).read()
+        except (urllib.error.URLError, OSError):
+            return 0.0
+        return time.monotonic() - t0
 
     def healthy(self) -> bool:
         try:
