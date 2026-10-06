@@ -53,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--models", help="where the .gguf files are")
     sv.add_argument("--port", type=int, default=DEFAULT_PORT)
     sv.add_argument("-c", "--ctx", type=int, default=0, help="context to prefer (default: the largest that fits)")
+    sv.add_argument("--keep-alive", type=float, default=600.0, metavar="SECONDS",
+                    help="give the memory back after this long without a request (0 = never; default 600). "
+                         "A model on the GPU whole wires nearly all of it, and wired memory cannot be paged "
+                         "out, so everything else on the Mac swaps while it sits there unused")
 
     for p in (f, ls, sv):
         p.add_argument("--llama-server", help="path to llama-server (it reports the Metal working set)")
@@ -95,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     if not server:
         print("llama-server not found; pass --llama-server <path>", file=sys.stderr)
         return 1
-    proxy.serve(_models_dir(a.models), server, a.port, a.ctx)
+    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive)
     return 0
 
 

@@ -89,6 +89,13 @@ metalfit serve --models ~/models        # the page and the API on 127.0.0.1:8099
 running - streamed replies included. Switching is one llama-server stopping and another starting, which for a
 35 GiB model that maps takes about 13 seconds.
 
+**It gives the memory back when you stop using it.** A model on the GPU whole wires nearly all of it - 39.8 GiB
+of a 48 GB Mac for a 35 GiB model - and wired memory cannot be paged out, so while it sits there unused every
+browser tab and editor on the machine goes to swap instead. After ten idle minutes (`--keep-alive`, 0 to switch
+it off) metalfit unloads, and the next request loads it again, which took 17.8 s in the same measurement. A
+request naming a model loads that model, so a chat app can switch without touching this page, and `/v1/models`
+answers from the folder whether or not anything is running.
+
 `--llama-server <path>` if it is not next to you or on `PATH`; `METALFIT_LLAMA_SERVER` does the same.
 `--working-set-gib` overrides what Metal reports, which is useful for asking "what would fit if I raised
 `iogpu.wired_limit_mb`" without raising it.

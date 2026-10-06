@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import signal
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,15 +28,34 @@ class State:
     """What is loaded, and the models we could load.  Guarded by a lock because a switch takes a minute and
     requests keep arriving during it."""
 
-    def __init__(self, models_dir: Path, llama_server: Path, default_ctx: int = 0):
+    def __init__(self, models_dir: Path, llama_server: Path, default_ctx: int = 0,
+                 keep_alive: float = 600.0):
         self.models_dir = models_dir
         self.llama_server = llama_server
         self.default_ctx = default_ctx
+        self.keep_alive = keep_alive
         self.working_set = fit.working_set(llama_server)
         self.engine: eng.Engine | None = None
         self.lock = threading.Lock()
         self.busy = ""                      # a human-readable "what is happening" while switching
+        self.last_used = time.monotonic()
+        self.last_plan: fit.Plan | None = None
         self._models: list[fit.Model] | None = None
+        if keep_alive > 0:
+            threading.Thread(target=self._reaper, daemon=True).start()
+
+    def _reaper(self) -> None:
+        """Give the memory back when nobody is using the model.
+
+        A model that fits the GPU whole wires nearly all of it - 39.8 GiB of a 48 GB Mac for a 35 GiB model -
+        and wired memory cannot be paged out, so everything else on the machine goes to swap instead.  That is
+        fine while you are using the model and miserable the rest of the time, which is why Ollama unloads
+        after a few idle minutes and why this does too."""
+        while True:
+            time.sleep(10)
+            if self.engine and not self.busy and time.monotonic() - self.last_used > self.keep_alive:
+                print(f"[metalfit] idle for {self.keep_alive / 60:.0f} min, giving the memory back")
+                self.unload()
 
     def models(self, rescan: bool = False) -> list[fit.Model]:
         if self._models is None or rescan:
@@ -62,6 +82,8 @@ class State:
         return {
             "working_set_gib": round(self.working_set / fit.GIB, 2),
             "busy": self.busy,
+            "keep_alive_s": self.keep_alive,
+            "idle_s": round(time.monotonic() - self.last_used) if self.engine else None,
             "loaded": None if not (cur and cur.alive()) else {
                 "name": cur.plan.model.path.name,
                 "path": str(cur.plan.model.path),
@@ -101,8 +123,26 @@ class State:
             except Exception as exc:
                 self.busy = ""
                 raise RuntimeError(f"{m.path.name} did not start: {exc}") from exc
-            self.engine, self.busy = e, ""
+            self.engine, self.busy, self.last_used = e, "", time.monotonic()
+            self.last_plan = plan
             return self.describe()
+
+    def ensure(self, name: str | None) -> None:
+        """Make sure the model a request asks for is the one running, loading it if need be.
+
+        `name` is what llama-server calls the model over the API (engine.model_name), which is the file's stem.
+        An unknown name is left alone: the request then goes to whatever is loaded, which is what a client that
+        sends its own label expects."""
+        cur = self.engine
+        if name:
+            for m in self.models():
+                if eng.model_name(m.path) == name:
+                    if cur and cur.alive() and cur.plan.model.path == m.path:
+                        return
+                    self.load(str(m.path))
+                    return
+        if not (cur and cur.alive()) and self.last_plan is not None:
+            self.load(str(self.last_plan.model.path), self.last_plan.n_ctx)
 
     def unload(self) -> dict:
         with self.lock:
@@ -151,12 +191,28 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- the pass-through
     def _upstream(self) -> None:
+        self.state.last_used = time.monotonic()
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) or None
+
+        # A request naming a model loads it, as Ollama does: after an idle unload the next message would
+        # otherwise fail, and a chat app has no way to press "load".
+        wanted = None
+        if body:
+            try:
+                wanted = json.loads(body).get("model")
+            except (ValueError, AttributeError):
+                pass
+        try:
+            self.state.ensure(wanted)
+        except Exception as exc:
+            self._json(503, {"error": {"message": str(exc), "type": "metalfit_load_failed"}})
+            return
+
         e = self.state.engine
         if not (e and e.alive()):
             msg = self.state.busy or "no model is loaded - open the page and start one"
             self._json(503, {"error": {"message": msg, "type": "metalfit_no_model"}})
             return
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0)) or None
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
         req = urllib.request.Request(f"http://127.0.0.1:{e.port}{self.path}", data=body,
                                      headers=headers, method=self.command)
@@ -192,6 +248,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/rescan"):
             self.state.models(rescan=True)
             return self._json(200, self.state.describe())
+        if self.path.rstrip("/") == "/v1/models":
+            return self._json(200, {"object": "list", "data": [
+                {"id": eng.model_name(m.path), "object": "model", "owned_by": "metalfit",
+                 "created": 0} for m in self.state.models()]})
         if self.path.startswith("/v1/") or self.path in ("/health", "/props", "/slots"):
             return self._upstream()
         self._send(404, b"not found", "text/plain")
@@ -212,14 +272,17 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain")
 
 
-def serve(models_dir: Path, llama_server: Path, port: int = 8099, default_ctx: int = 0) -> None:
-    state = State(models_dir, llama_server, default_ctx)
+def serve(models_dir: Path, llama_server: Path, port: int = 8099, default_ctx: int = 0,
+          keep_alive: float = 600.0) -> None:
+    state = State(models_dir, llama_server, default_ctx, keep_alive)
     handler = type("BoundHandler", (Handler,), {"state": state})
     httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
     n = len(state.models())
     print(f"[metalfit] {n} model{'s' if n != 1 else ''} in {models_dir}")
     print(f"[metalfit] Metal working set {state.working_set / fit.GIB:.2f} GiB")
     print(f"[metalfit] open http://127.0.0.1:{port}/   API: http://127.0.0.1:{port}/v1")
+    print(f"[metalfit] " + (f"the model is unloaded after {keep_alive / 60:.0f} idle minutes"
+                            if keep_alive > 0 else "the model stays loaded until you stop it"))
 
     # Without this a `kill` or a closed terminal leaves llama-server running, and a 35 GiB model stays wired
     # with nothing in front of it.  Default SIGTERM ends Python without unwinding, so `finally` never runs.
