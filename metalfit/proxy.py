@@ -92,8 +92,14 @@ class State:
             self._models = found
         return self._models
 
+    DEFAULT_CTX = 32768
+
     def best_ctx(self, m: fit.Model) -> int:
-        p = fit.plan(m, self.default_ctx or 131072, self.working_set)
+        """The context to load with.  Not the largest that fits: a big KV cache makes the load slow - 131072
+        took 69 s for a 21 GB model where 32768 takes a fraction of that - and a chat app gives up long
+        before.  --ctx raises it deliberately."""
+        want = self.default_ctx or self.DEFAULT_CTX
+        p = fit.plan(m, want, self.working_set)
         return p.n_ctx if p.fits_whole else (p.max_ctx or 8192)
 
     def describe(self) -> dict:
@@ -311,7 +317,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(models_dir: Path, llama_server: Path, port: int = 8099, default_ctx: int = 0,
           keep_alive: float = 600.0, gpu_layers: int | None = None, keep_free_gib: float = 0.0,
-          no_thinking: bool = False) -> None:
+          no_thinking: bool = False, preload: str | None = None) -> None:
     state = State(models_dir, llama_server, default_ctx, keep_alive)
     state.gpu_layers = gpu_layers
     state.keep_free = int(keep_free_gib * fit.GIB)
@@ -337,6 +343,18 @@ def serve(models_dir: Path, llama_server: Path, port: int = 8099, default_ctx: i
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, bye)
+    if preload:
+        hit = [m for m in state.models() if preload.lower() in m.path.name.lower()]
+        if hit:
+            print(f"[metalfit] loading {hit[0].path.name} now, so the first message does not wait for it")
+            try:
+                state.load(str(hit[0].path))
+                print(f"[metalfit] ready: {state.engine.plan.advice}")
+            except Exception as exc:
+                print(f"[metalfit] could not preload: {exc}")
+        else:
+            print(f"[metalfit] nothing matching '{preload}' to preload")
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

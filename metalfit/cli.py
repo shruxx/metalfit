@@ -57,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="put only N layers on the GPU even when the whole model would fit. The GPU's share is "
                          "wired and macOS cannot page it out; the rest are mapped file pages it can drop, so "
                          "this is how a large model shares a Mac you also work on")
+    sv.add_argument("--preload", metavar="NAME",
+                    help="load this model at startup (substring of the file name), so the first message is "
+                         "answered instead of waiting a minute for the model")
     sv.add_argument("--no-thinking", action="store_true",
                     help="tell the chat template not to think. A reasoning model quantized hard can "
                          "deliberate without ever answering: Kolibri-1 at 2.7 bits spent 12000 tokens on one "
@@ -112,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     if not server:
         print("llama-server not found; pass --llama-server <path>", file=sys.stderr)
         return 1
-    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive, a.gpu_layers, a.keep_free_gib, a.no_thinking)
+    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive, a.gpu_layers, a.keep_free_gib, a.no_thinking, a.preload)
     return 0
 
 
