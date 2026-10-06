@@ -121,7 +121,12 @@ class Engine:
         11.4 s with the file still in the page cache and 143 s with it cold, against ~1 s for every reply
         after.  A chat app times out long before that, so the wait belongs in the load, where something is
         visibly loading."""
-        body = json.dumps({"prompt": "\\n", "n_predict": 1, "temperature": 0}).encode()
+        # More than one token, because a mixture-of-experts routes each token to a handful of its experts:
+        # Kolibri-1 uses 6 of 384 per layer, so one token pages in almost nothing.  128 tokens do not reach
+        # them all either - measured, generation climbed from 21.5 to ~31 tok/s over six real requests - but
+        # they take the worst of it off the first reply.
+        body = json.dumps({"prompt": "Hallo. Bitte zaehle langsam von eins bis zwanzig.",
+                           "n_predict": 128, "temperature": 0.8}).encode()
         t0 = time.monotonic()
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{self.port}/completion", data=body,
