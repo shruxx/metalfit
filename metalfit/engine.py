@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -51,6 +52,14 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def model_name(path: Path) -> str:
+    """What to call the model over the API: the file's stem without the shard suffix."""
+    stem = Path(path).name
+    for suffix in (".gguf",):
+        stem = stem[: -len(suffix)] if stem.endswith(suffix) else stem
+    return re.sub(r"-\d{5}-of-\d{5}$", "", stem)
+
+
 def command(llama_server: Path, plan: fit.Plan, port: int, threads: int | None = None,
             ctk: str = "q8_0", ctv: str = "q8_0") -> list[str]:
     """llama-server's command line for a plan.
@@ -60,6 +69,9 @@ def command(llama_server: Path, plan: fit.Plan, port: int, threads: int | None =
     memory means it can plan a split that then has nowhere to live.  A model that does not fit is left to
     --fit, because choosing a split well needs measurement, not arithmetic (see the README)."""
     cmd = [str(llama_server), "-m", str(plan.model.path), "-c", str(plan.n_ctx),
+           # without an alias llama-server reports the model by its full path, which is what a chat app then
+           # shows in its model picker
+           "--alias", model_name(plan.model.path),
            "--port", str(port), "--host", "127.0.0.1", "--parallel", "1",
            "--threads", str(threads or performance_cores()),
            "-ctk", ctk, "-ctv", ctv]
