@@ -45,6 +45,7 @@ class State:
         self.last_used = time.monotonic()
         self.last_plan: fit.Plan | None = None
         self._models: list[fit.Model] | None = None
+        self._seen: tuple = ()
         if keep_alive > 0:
             threading.Thread(target=self._reaper, daemon=True).start()
 
@@ -61,7 +62,21 @@ class State:
                 print(f"[metalfit] idle for {self.keep_alive / 60:.0f} min, giving the memory back")
                 self.unload()
 
+    def _folder_state(self) -> tuple:
+        """A cheap signature of the models folder: every .gguf with its size and mtime.  Reading headers for
+        each model costs real time, so the list is cached - but a cache that only fills at startup is wrong in
+        a tool whose job is managing models: files added or deleted while it runs would never show up, and a
+        chat app would offer models that are gone."""
+        try:
+            return tuple(sorted((str(f), f.stat().st_size, int(f.stat().st_mtime))
+                                for f in self.models_dir.rglob("*.gguf")))
+        except OSError:
+            return ()
+
     def models(self, rescan: bool = False) -> list[fit.Model]:
+        now = self._folder_state()
+        if now != self._seen:
+            rescan, self._seen = True, now
         if self._models is None or rescan:
             found = []
             for p in sorted(self.models_dir.rglob("*.gguf")):
