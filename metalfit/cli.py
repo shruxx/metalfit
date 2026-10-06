@@ -57,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="put only N layers on the GPU even when the whole model would fit. The GPU's share is "
                          "wired and macOS cannot page it out; the rest are mapped file pages it can drop, so "
                          "this is how a large model shares a Mac you also work on")
+    sv.add_argument("--no-thinking", action="store_true",
+                    help="tell the chat template not to think. A reasoning model quantized hard can "
+                         "deliberate without ever answering: Kolibri-1 at 2.7 bits spent 12000 tokens on one "
+                         "PowerShell script and produced none of it, and wrote the same script in 1641 with "
+                         "this set")
     sv.add_argument("--keep-free-gib", type=float, default=0.0, metavar="N",
                     help="leave N GB of the Mac for everything else, and put only as many layers on the GPU "
                          "as that allows. What the GPU holds is wired and cannot be paged out; the rest are "
@@ -107,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     if not server:
         print("llama-server not found; pass --llama-server <path>", file=sys.stderr)
         return 1
-    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive, a.gpu_layers, a.keep_free_gib)
+    proxy.serve(_models_dir(a.models), server, a.port, a.ctx, a.keep_alive, a.gpu_layers, a.keep_free_gib, a.no_thinking)
     return 0
 
 

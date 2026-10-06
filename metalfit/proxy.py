@@ -36,6 +36,7 @@ class State:
         self.keep_alive = keep_alive
         self.gpu_layers: int | None = None      # None = all of it when it fits; a number forces a split
         self.keep_free: int = 0                 # bytes of the machine to leave alone; picks the layer count
+        self.no_thinking = False                # pass enable_thinking=false to the chat template
         self.ram = fit.physical_memory()
         self.working_set = fit.working_set(llama_server)
         self.engine: eng.Engine | None = None
@@ -86,6 +87,7 @@ class State:
             "working_set_gib": round(self.working_set / fit.GIB, 2),
             "busy": self.busy,
             "keep_alive_s": self.keep_alive,
+            "no_thinking": self.no_thinking,
             "idle_s": round(time.monotonic() - self.last_used) if self.engine else None,
             "loaded": None if not (cur and cur.alive()) else {
                 "name": cur.plan.model.path.name,
@@ -209,9 +211,19 @@ class Handler(BaseHTTPRequestHandler):
         wanted = None
         if body:
             try:
-                wanted = json.loads(body).get("model")
+                parsed = json.loads(body)
+                wanted = parsed.get("model")
             except (ValueError, AttributeError):
-                pass
+                parsed = None
+            # A reasoning model quantized hard can think without ever answering.  Kolibri-1 at 2.7 bits spent
+            # 12000 tokens and 194 s deliberating over one PowerShell script and produced nothing; with
+            # thinking off it wrote the same script in 1641 tokens and 25 s.  Its chat template takes
+            # `enable_thinking`, so this turns it off per request, without restarting anything.  A client that
+            # sets chat_template_kwargs itself is left alone.
+            if (self.state.no_thinking and isinstance(parsed, dict)
+                    and "chat_template_kwargs" not in parsed and "/chat/completions" in self.path):
+                parsed["chat_template_kwargs"] = {"enable_thinking": False}
+                body = json.dumps(parsed).encode()
         try:
             self.state.ensure(wanted)
         except Exception as exc:
@@ -283,10 +295,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(models_dir: Path, llama_server: Path, port: int = 8099, default_ctx: int = 0,
-          keep_alive: float = 600.0, gpu_layers: int | None = None, keep_free_gib: float = 0.0) -> None:
+          keep_alive: float = 600.0, gpu_layers: int | None = None, keep_free_gib: float = 0.0,
+          no_thinking: bool = False) -> None:
     state = State(models_dir, llama_server, default_ctx, keep_alive)
     state.gpu_layers = gpu_layers
     state.keep_free = int(keep_free_gib * fit.GIB)
+    state.no_thinking = no_thinking
     handler = type("BoundHandler", (Handler,), {"state": state})
     httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
     n = len(state.models())
