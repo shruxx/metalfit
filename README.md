@@ -59,7 +59,9 @@ well needs measurement on the machine, not arithmetic.
   only 513 tokens on 40 of its 50 layers, so 128K context costs it 1.35 GiB instead of ~7 GB. Qwen3.8-Flash-Next
   is hybrid: 12 of 48 layers have a KV cache and 36 keep a recurrent state that does not grow with the context.
   metalfit reads `attention.sliding_window_pattern`, `attention.compress_ratios` and the `ssm.*` keys to tell
-  these apart.
+  these apart. Qwen3.5 / 3.6 (`qwen35`, `qwen35moe`) give only `full_attention_interval`; counted as every
+  layer, Qwen3.8-27B needed 17.27 GiB of KV at 128K instead of 4.66. gemma4 gives its KV heads per layer (2 on
+  the full layers, 8 on the sliding ones), which read as one number came out as no KV cache at all.
 - **Tensor sizes without knowing the quantization.** From the gaps between data offsets, never from the type,
   because the interesting files are the ones with types too new for the tooling. `GGML_TYPE_Q2_0` is 42 of 43,
   and neither the `gguf` PyPI package nor Ollama's importer can size a tensor that uses it - Ollama refuses such
@@ -108,6 +110,15 @@ it off) metalfit unloads, and the next request loads it again, which took 17.8 s
 request naming a model loads that model, so a chat app can switch without touching this page, and `/v1/models`
 answers from the folder whether or not anything is running.
 
+**In the menu bar.** `menubar/build.sh` builds `MetalfitBar.app` (Swift, AppKit only, needs `swiftc`): the
+loaded model's name in the menu bar, and a menu to switch models, unload, and start or stop the server. It
+only uses the API above, polled every 2 s, so it also follows a server started by hand. Stopping sends
+SIGTERM to whatever listens on the port, which metalfit answers by unloading, so no llama-server stays behind
+with its memory wired. With "Start server when this app opens" and the app in the Login Items, the server
+comes up at every login. Keep metalfit and llama-server out of `~/Documents`, `~/Desktop` and `~/Downloads`
+(`uv tool install .` puts metalfit in `~/.local/bin`): macOS asks the app for access to those folders, and
+until someone answers, the server hangs in its first `open()`.
+
 `--llama-server <path>` if it is not next to you or on `PATH`; `METALFIT_LLAMA_SERVER` does the same.
 `--working-set-gib` overrides what Metal reports, which is useful for asking "what would fit if I raised
 `iogpu.wired_limit_mb`" without raising it.
@@ -119,8 +130,11 @@ answers from the folder whether or not anything is running.
 - **It does not pick a split** for a model that does not fit - see above.
 - **Apple Silicon only.** The whole point is Metal's working set and the unified memory, neither of which a
   discrete GPU has.
-- **Tested on one Mac**, an M5 Pro with 48 GB, against two model families. The arithmetic should hold wherever
-  the same llama.cpp does, but numbers from other Macs would be welcome.
+- **Tested on two Macs**: an M5 Pro with 48 GB against two model families, and a MacBook Pro M1 Max with
+  32 GB (27.0 GiB working set) running Qwen3.6-35B-A3B whole at `-c 32768`. There, through the server at
+  temperature 0, three ~500-token replies averaged 50.2 tok/s at UD-Q2_K_XL, 48.1 at UD-Q3_K_XL, 44.5 at
+  UD-Q4_K_XL and UD-IQ4_XS, and 41.1 at MXFP4_MOE; after an 8969-token prompt all of them wrote 28-31 tok/s.
+  Numbers from other Macs would be welcome.
 
 ## Acknowledgements
 
