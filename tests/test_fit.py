@@ -5,7 +5,7 @@ breaks one of these, the change is wrong until the Mac says otherwise.
 """
 import unittest
 
-from metalfit.fit import GIB, COMPUTE_RESERVE, Model, kv_bytes, plan
+from metalfit.fit import GIB, COMPUTE_RESERVE, Model, kv_bytes, kv_heads, kv_layout, plan
 
 STOCK_WS = 38338 * 1024 * 1024          # what llama-server reports at the stock Metal limit: 37.44 GiB
 RAISED_WS = 41984 * 1024 * 1024         # after sudo sysctl iogpu.wired_limit_mb=41984: 41.0 GiB
@@ -72,6 +72,37 @@ class KolibriQuants(unittest.TestCase):
         self.assertLess(kv_bytes(m, 131072), 1.6 * GIB)
         full = Model(**{**m.__dict__, "kv_layers": 50, "swa_layers": 0, "swa_window": 0})
         self.assertGreater(kv_bytes(full, 131072), 4 * kv_bytes(m, 131072))
+
+
+class HybridInterval(unittest.TestCase):
+    """qwen35 / qwen35moe give only full_attention_interval; llama.cpp makes every 4th layer attention and the
+    MTP layers too.  Counted as every layer, Qwen3.8-27B (65 blocks, 1 MTP) needed 17.27 GiB of KV at 128K."""
+
+    def test_every_fourth_layer_and_the_mtp_layer(self):
+        self.assertEqual(kv_layout(65, interval=4, nextn=1), (17, 0))   # Qwen3.8-27B: 16 + 1 MTP
+        self.assertEqual(kv_layout(40, interval=4), (10, 0))            # Qwen3.6-35B-A3B without MTP
+
+    def test_a_pattern_or_ratios_still_win(self):
+        self.assertEqual(kv_layout(50, pattern=[True] * 40 + [False] * 10, interval=4), (10, 40))
+        self.assertEqual(kv_layout(48, ratios=[0, 0, 0, 4] * 12, interval=4), (12, 0))
+
+
+class PerLayerHeads(unittest.TestCase):
+    """gemma-4-26B-A4B gives head_count_kv per layer (8 sliding, 2 full) and its own key/value length for the
+    sliding layers (256 against 512).  Read as one number the list was 0 heads and 0.00 GiB of KV."""
+
+    def test_heads_split_by_the_pattern(self):
+        pattern = ([True] * 5 + [False]) * 5
+        heads = ([8] * 5 + [2]) * 5
+        self.assertEqual(kv_heads(heads, pattern), (2, 8))
+        self.assertEqual(kv_heads(4), (4, 0))
+
+    def test_gemma4_kv_at_128k(self):
+        m = Model(path=None, shards=(), arch="gemma4", n_layers=30, file_bytes=0, lazy_bytes=0, must_hold=0,
+                  kv_layers=5, swa_layers=25, swa_window=1024, n_head_kv=2, k_len=512, v_len=512, ssm_bytes=0,
+                  n_head_kv_swa=8, k_len_swa=256, v_len_swa=256)
+        # 5 full layers * 2 heads * 1024 * 34/32 bytes * 131072 = 1.33 GiB, 25 sliding ones add 0.10
+        self.assertAlmostEqual(kv_bytes(m, 131072) / GIB, 1.43, delta=0.01)
 
 
 class Reserve(unittest.TestCase):

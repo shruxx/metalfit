@@ -64,6 +64,9 @@ class Model:
     ssm_bytes: int             # the recurrent state of a hybrid model's non-attention layers, per sequence
     block_bytes: tuple[int, ...] = ()   # each transformer block's weights, in file order
     head_bytes: int = 0                 # the output head, which -ngl counts as one more layer
+    n_head_kv_swa: int = 0              # a sliding-window layer's KV heads and lengths, 0 when the same
+    k_len_swa: int = 0
+    v_len_swa: int = 0
 
     @property
     def n_gpu_layers_all(self) -> int:
@@ -105,25 +108,18 @@ def inspect(path: str | Path) -> Model:
                 head += t.nbytes
 
     n_layers = _int(first.key("block_count"))
-    n_head_kv = _int(first.key("attention.head_count_kv"))
+    pattern = first.key("attention.sliding_window_pattern")
+    n_head_kv, n_head_kv_swa = kv_heads(first.key("attention.head_count_kv"), pattern)
     k_len = _int(first.key("attention.key_length"))
     v_len = _int(first.key("attention.value_length"), k_len)
+    k_len_swa = _int(first.key("attention.key_length_swa"))
+    v_len_swa = _int(first.key("attention.value_length_swa"), k_len_swa)
     window = _int(first.key("attention.sliding_window"))
 
-    # Which layers hold a KV cache, and how long.  Three shapes, in the order they can be told apart:
-    #   - a per-layer sliding-window pattern (Kolibri-1: 40 of 50 layers sliding, true means sliding)
-    #   - a hybrid model marking its attention layers (Qwen3.8-Flash-Next: compress_ratios is non-zero on every
-    #     full_attention_interval-th layer, the other 36 are recurrent and have no KV cache at all)
-    #   - everything else: every layer, context-sized
-    pattern = first.key("attention.sliding_window_pattern")
-    ratios = first.key("attention.compress_ratios")
-    if isinstance(pattern, list) and pattern:
-        swa_layers = sum(1 for p in pattern if p)
-        kv_layers = len(pattern) - swa_layers
-    elif isinstance(ratios, list) and ratios:
-        kv_layers, swa_layers = sum(1 for r in ratios if r), 0
-    else:
-        kv_layers, swa_layers = n_layers, 0
+    kv_layers, swa_layers = kv_layout(n_layers, pattern,
+                                      first.key("attention.compress_ratios"),
+                                      _int(first.key("full_attention_interval")),
+                                      _int(first.key("nextn_predict_layers")))
 
     # a hybrid model's recurrent layers keep a fixed state instead, which does not grow with the context
     ssm_inner = _int(first.key("ssm.inner_size"))
@@ -136,14 +132,55 @@ def inspect(path: str | Path) -> Model:
                  file_bytes=file_bytes, lazy_bytes=lazy, must_hold=file_bytes - lazy,
                  kv_layers=kv_layers, swa_layers=swa_layers, swa_window=window,
                  n_head_kv=n_head_kv, k_len=k_len, v_len=v_len, ssm_bytes=ssm_bytes,
-                 block_bytes=tuple(blocks[i] for i in sorted(blocks)), head_bytes=head)
+                 block_bytes=tuple(blocks[i] for i in sorted(blocks)), head_bytes=head,
+                 n_head_kv_swa=n_head_kv_swa, k_len_swa=k_len_swa, v_len_swa=v_len_swa)
+
+
+def kv_heads(heads, pattern=None) -> tuple[int, int]:
+    """KV heads of the context-sized layers and of the sliding-window ones.  Most files give one number; gemma4
+    gives one per layer, 2 on its full-attention layers and 8 on the sliding ones, and read as a single number
+    that list counted as 0 heads and a KV cache of nothing."""
+    if not isinstance(heads, list):
+        return _int(heads), 0
+    if not heads:
+        return 0, 0
+    if isinstance(pattern, list) and len(pattern) == len(heads):
+        full = [h for h, p in zip(heads, pattern) if not p]
+        swa = [h for h, p in zip(heads, pattern) if p]
+        return max(full, default=0), max(swa, default=0)
+    return max(_int(h) for h in heads), 0
+
+
+def kv_layout(n_layers: int, pattern=None, ratios=None, interval: int = 0, nextn: int = 0) -> tuple[int, int]:
+    """Which layers hold a KV cache, and how long: (context-sized, sliding-window).  Four shapes, in the order
+    they can be told apart:
+      - a per-layer sliding-window pattern (Kolibri-1: 40 of 50 layers sliding, true means sliding)
+      - a hybrid model marking its attention layers (Qwen3.8-Flash-Next: compress_ratios is non-zero on every
+        full_attention_interval-th layer, the other 36 are recurrent and have no KV cache at all)
+      - a hybrid model giving only the interval (qwen35, qwen35moe, qwen3next: layer i is recurrent unless
+        (i + 1) % interval == 0, and the last nextn_predict_layers blocks are MTP layers with attention, as
+        llama.cpp's models/qwen35moe.cpp marks them)
+      - everything else: every layer, context-sized"""
+    if isinstance(pattern, list) and pattern:
+        swa = sum(1 for p in pattern if p)
+        return len(pattern) - swa, swa
+    if isinstance(ratios, list) and ratios:
+        return sum(1 for r in ratios if r), 0
+    if interval > 0:
+        trunk = max(n_layers - nextn, 0)
+        return trunk // interval + (n_layers - trunk), 0
+    return n_layers, 0
 
 
 def kv_bytes(m: Model, n_ctx: int, ctk: str = "q8_0", ctv: str = "q8_0") -> int:
-    """The KV cache for `n_ctx` tokens.  A sliding-window layer only caches its window."""
-    per_tok = m.n_head_kv * (m.k_len * KV_BPE.get(ctk, 2.0) + m.v_len * KV_BPE.get(ctv, 2.0))
+    """The KV cache for `n_ctx` tokens.  A sliding-window layer only caches its window, and may have heads of
+    its own shape (the *_swa fields, 0 where the file gives none)."""
+    bk, bv = KV_BPE.get(ctk, 2.0), KV_BPE.get(ctv, 2.0)
+    per_tok = m.n_head_kv * (m.k_len * bk + m.v_len * bv)
+    per_tok_swa = ((m.n_head_kv_swa or m.n_head_kv) *
+                   ((m.k_len_swa or m.k_len) * bk + (m.v_len_swa or m.v_len) * bv))
     swa_ctx = min(n_ctx, m.swa_window) if m.swa_window else n_ctx
-    return int(per_tok * (m.kv_layers * n_ctx + m.swa_layers * swa_ctx)) + m.ssm_bytes
+    return int(per_tok * m.kv_layers * n_ctx + per_tok_swa * m.swa_layers * swa_ctx) + m.ssm_bytes
 
 
 def physical_memory() -> int:
