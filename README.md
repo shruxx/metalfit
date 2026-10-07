@@ -76,7 +76,21 @@ the Mac did, the change is wrong until the Mac says otherwise.
 
 ## Install and use
 
-Python 3.11 or newer, no dependencies, and a `llama-server` binary from
+**The app, with everything in it.** On a Mac with Apple Silicon and macOS 14 or newer:
+
+```bash
+curl -fsSL https://github.com/shruxx/metalfit/releases/latest/download/install.sh | sh
+```
+
+That puts `MetalfitBar.app` into `~/Applications` and starts it: a menu bar item that runs the server, shows
+the loaded model and switches between models. The app carries its own Python 3.12, metalfit and a Metal
+`llama-server` (31 MB zipped), so nothing else needs installing; the script checks the download against the
+release's `SHA256SUMS`. Put `.gguf` files into `~/models` - they appear in the menu within 2 s - and point a chat
+app at `http://127.0.0.1:8099/v1`. Running the same line again updates it. `release/build.sh` makes the
+release; the app is signed ad hoc, not with a Developer ID, so a zip downloaded in a browser instead of with
+the script has to be opened once with right-click > Open.
+
+**From the source.** Python 3.11 or newer, no dependencies, and a `llama-server` binary from
 [llama.cpp](https://github.com/ggml-org/llama.cpp) built with Metal.
 
 ```bash
@@ -117,8 +131,9 @@ while one loads, none when the server is up with nothing loaded, a dashed outlin
 app icon is the same mark, drawn by the same code (`menubar/Icon.swift`). It
 only uses the API above, polled every 2 s, so it also follows a server started by hand. Stopping sends
 SIGTERM to whatever listens on the port, which metalfit answers by unloading, so no llama-server stays behind
-with its memory wired. With "Start server when this app opens" and the app in the Login Items, the server
-comes up at every login. Keep metalfit and llama-server out of `~/Documents`, `~/Desktop` and `~/Downloads`
+with its memory wired. With "Open at login" and "Start server when this app opens" in its menu, the server
+comes up at every login. An open menu is rebuilt on every poll, so a model deleted from the folder is gone
+from it within 2 s. Keep metalfit and llama-server out of `~/Documents`, `~/Desktop` and `~/Downloads`
 (`uv tool install .` puts metalfit in `~/.local/bin`): macOS asks the app for access to those folders, and
 until someone answers, the server hangs in its first `open()`.
 

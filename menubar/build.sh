@@ -1,13 +1,13 @@
 #!/bin/sh
 # Builds MetalfitBar.app next to this script: a menu bar item showing which model metalfit has loaded.
-# Needs only the Xcode command line tools (swiftc).  Copy the app to /Applications and add it to
-# System Settings > General > Login Items to have it at every login.
+# Needs only the Xcode command line tools (swiftc).  Copy the app to ~/Applications; its menu's "Open at login"
+# starts it at every login.  release/build.sh builds on this for the self-contained release.
 set -e
 cd "$(dirname "$0")"
 APP=MetalfitBar.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -parse-as-library -o "$APP/Contents/MacOS/MetalfitBar" MetalfitBar.swift Icon.swift
+swiftc -O -parse-as-library -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/MetalfitBar" MetalfitBar.swift Icon.swift
 
 # the app icon, drawn by the same code as the menu bar item
 TMP="$(mktemp -d)"
@@ -16,7 +16,8 @@ swiftc -O -parse-as-library -o "$TMP/makeicon" makeicon.swift AppIcon.swift Icon
 iconutil -c icns -o "$APP/Contents/Resources/AppIcon.icns" "$TMP/AppIcon.iconset"
 rm -rf "$TMP"
 
-cat > "$APP/Contents/Info.plist" <<'EOF'
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' ../pyproject.toml)"
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -26,7 +27,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleExecutable</key><string>MetalfitBar</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSAppTransportSecurity</key>
@@ -46,9 +48,14 @@ EOF
 # read those folders, and until someone answers the server hangs in its first open() - Python reading its
 # pyvenv.cfg - and the ad-hoc signature changes with every build, so it asks again.  `uv tool install .`
 # puts metalfit in ~/.local/bin, which is not protected.
+#
+# METALFIT_BUNDLED=1 writes no command: release/build.sh puts Python, metalfit and llama-server into the app,
+# and the app runs those.
 BIN="${METALFIT_BIN:-$(command -v metalfit || true)}"
 [ -n "$BIN" ] || { [ -x "$(cd .. && pwd)/.venv/bin/metalfit" ] && BIN="$(cd .. && pwd)/.venv/bin/metalfit"; }
-if [ -z "$BIN" ]; then
+if [ -n "$METALFIT_BUNDLED" ]; then
+    :
+elif [ -z "$BIN" ]; then
     echo "warning: no metalfit found (METALFIT_BIN, PATH or .venv); 'Start server' will say so" >&2
 else
     LLAMA="${METALFIT_LLAMA_SERVER:-$(command -v llama-server || true)}"
