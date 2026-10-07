@@ -53,11 +53,20 @@ struct Loaded: Decodable, Equatable {
     let whole: Bool
 }
 
+/// What metalfit measured from real replies on this Mac; nil fields were not measured yet.
+struct Speed: Decodable, Equatable {
+    let gen: Double?
+    let gen_long: Double?
+    let prompt: Double?
+    let replies: Int
+}
+
 struct Entry: Decodable, Equatable {
     let name: String
     let path: String
     let file_gb: Double
     let advice: String
+    let speed: Speed?
 }
 
 struct Status: Decodable {
@@ -249,9 +258,20 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         for m in s.models {
-            let mi = action(stem(m.name) + String(format: "  %.1f GB", m.file_gb), #selector(load(_:)))
+            var title = stem(m.name) + String(format: "  %.1f GB", m.file_gb)
+            if let g = m.speed?.gen ?? m.speed?.gen_long { title += String(format: " · %.0f tok/s", g) }
+            let mi = action(title, #selector(load(_:)))
             mi.representedObject = m.path
-            mi.toolTip = m.advice
+            var tip = m.advice
+            if let sp = m.speed {
+                if let g = sp.gen { tip += String(format: "\nwriting: %.1f tok/s", g) }
+                if let g = sp.gen_long { tip += String(format: "\nwriting at long context: %.1f tok/s", g) }
+                if let p = sp.prompt { tip += String(format: "\nreading prompts: %.0f tok/s", p) }
+                tip += "\nmeasured from \(sp.replies) replies on this Mac"
+            } else {
+                tip += "\nspeed: not measured on this Mac yet"
+            }
+            mi.toolTip = tip
             mi.state = s.loaded?.path == m.path ? .on : .off
             mi.isEnabled = s.busy.isEmpty
             menu.addItem(mi)

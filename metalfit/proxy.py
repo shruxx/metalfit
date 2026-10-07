@@ -18,6 +18,7 @@ from pathlib import Path
 
 from . import engine as eng
 from . import fit
+from . import speeds
 
 WEB = Path(__file__).parent / "web"
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
@@ -69,6 +70,8 @@ class State:
         self.last_plan: fit.Plan | None = None
         self._models: list[fit.Model] | None = None
         self._seen: tuple = ()
+        self._scan_lock = threading.Lock()
+        self._inspected: dict[tuple, fit.Model] = {}    # (path, size, mtime) -> what its headers said
         if keep_alive > 0:
             threading.Thread(target=self._reaper, daemon=True).start()
 
@@ -86,23 +89,31 @@ class State:
                 self.unload()
 
     def models(self, rescan: bool = False) -> list[fit.Model]:
-        now = folder_state(self.models_dir)
-        if now != self._seen:
-            rescan, self._seen = True, now
-        if self._models is None or rescan:
-            found = []
+        """The models in the folder, rescanned when it changed.  One scan at a time, and the new signature is
+        kept only once the scan is done: before, the first caller stored it and every request arriving during
+        its scan - the menu bar asks every 2 s - got the old list, deleted models included."""
+        with self._scan_lock:
+            now = folder_state(self.models_dir)
+            if self._models is not None and not rescan and now == self._seen:
+                return self._models
+            found, cache = [], {}
             for p in sorted(self.models_dir.rglob("*.gguf")):
                 shards = fit.gguf.shards(p)
                 if shards and shards[0] != p:       # a later shard of a split model: the first one covers it
                     continue
                 try:
-                    m = fit.inspect(p)
+                    st = p.stat()
+                    key = (str(p), st.st_size, int(st.st_mtime))
+                    # headers are read again only for files that changed
+                    m = self._inspected.get(key) if not rescan else None
+                    m = m or fit.inspect(p)
                 except Exception:                   # not a model we can read; skip rather than fail the list
                     continue
+                cache[key] = m
                 if m.runnable:
                     found.append(m)
-            self._models = found
-        return self._models
+            self._models, self._seen, self._inspected = found, now, cache
+            return self._models
 
     DEFAULT_CTX = 32768
 
@@ -143,6 +154,7 @@ class State:
                 "max_ctx": fit.plan(m, 131072, self.working_set).max_ctx,
                 "suggest_ctx": self.best_ctx(m),
                 "advice": fit.plan(m, self.best_ctx(m), self.working_set).advice,
+                "speed": speeds.summary(m.path),
             } for m in self.models()],
         }
 
@@ -280,10 +292,14 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_header(k, v)
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                tail = b""
                 while chunk := up.read(8192):     # streamed replies have to go out as they arrive
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
                     self.wfile.flush()
+                    tail = (tail + chunk)[-16384:]    # llama-server's timings come last
                 self.wfile.write(b"0\r\n\r\n")
+            if "/completions" in self.path and (t := speeds.extract_timings(tail)):
+                speeds.record(e.plan.model.path, t)
         except urllib.error.HTTPError as err:
             self._send(err.code, err.read() or b"", err.headers.get("Content-Type", "application/json"))
         except (urllib.error.URLError, OSError) as err:

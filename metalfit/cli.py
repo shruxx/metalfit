@@ -8,6 +8,7 @@ from pathlib import Path
 from . import engine as eng
 from . import fit
 from . import proxy
+from . import speeds
 
 DEFAULT_PORT = 8099
 
@@ -35,6 +36,7 @@ def _one(path: Path, ws: int, n_ctx: int) -> None:
           f"({m.kv_layers} layers context-sized" + (f", {m.swa_layers} capped at {m.swa_window}" if m.swa_layers else "") + ")")
     print(f"  Metal          {ws / fit.GIB:.2f} GiB working set")
     print(f"  -> {p.advice}")
+    print(f"  measured       {speeds.describe(speeds.summary(m.path))}")
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -124,6 +124,16 @@ it off) metalfit unloads, and the next request loads it again, which took 17.8 s
 request naming a model loads that model, so a chat app can switch without touching this page, and `/v1/models`
 answers from the folder whether or not anything is running.
 
+**It remembers how fast each model is on this Mac.** Every reply that passes through carries llama-server's
+own timings; metalfit keeps the last 30 per model and Mac (chip and memory) and shows the medians - writing at
+short and at long context, reading prompts - in `metalfit list`, on the page and in the menu bar. It measures
+rather than predicts because a prediction did not hold. On a 32 GB M1 Max with the 24-core GPU, Qwen3.6-35B-A3B
+followed the bytes it reads per token (about 16 ms per token plus 400 GB/s), but Qwen3.8-27B, a dense model,
+ran with the GPU 99 % busy at 9.5-10.9 tok/s for UD-Q2_K_XL: about 90 GB/s, held back by unpacking the weights,
+not by memory. Single kernels timed alone varied by up to 2x between runs, and the same model wrote 7.1 tok/s
+right after an hour of other benchmarks and 10.7 a few minutes later. A median of real replies holds; a formula
+did not. The numbers live in `~/Library/Application Support/metalfit/speeds.json`.
+
 **In the menu bar.** `menubar/build.sh` builds `MetalfitBar.app` (Swift, AppKit only, needs `swiftc`): the
 loaded model's name in the menu bar, and a menu to switch models, unload, and start or stop the server. Its
 mark is a chip filled by a stack of layers, and the fill is the state: every layer when a model is loaded, half
