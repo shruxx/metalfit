@@ -77,7 +77,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var lastError = ""
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        item.button?.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: "metalfit")
+        item.button?.image = menuBarImage(.off)
         item.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
@@ -175,23 +175,22 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.refresh() }   // show "busy" at once
     }
 
-    // ---- what the menu bar shows
+    // ---- what the menu bar shows: the mark says the state, text only for the loaded model's name
     func updateTitle() {
         guard let button = item.button else { return }
-        let title: String
-        if !serverState.isEmpty {
-            title = " …"
+        let state: MarkState
+        if !serverState.isEmpty || (status.map { !$0.busy.isEmpty } ?? false) {
+            state = .loading
         } else if !reachable {
-            title = " off"
-        } else if let s = status, !s.busy.isEmpty {
-            title = " …"
-        } else if let l = status?.loaded {
-            title = " " + short(l.name)
+            state = .off
+        } else if status?.loaded != nil {
+            state = .loaded
         } else {
-            title = " –"
+            state = .empty
         }
-        button.title = title
-        button.appearsDisabled = !reachable || status?.loaded == nil
+        button.image = menuBarImage(state)
+        button.title = state == .loaded ? " " + short(status!.loaded!.name) : ""
+        button.appearsDisabled = state == .off
         button.toolTip = status?.loaded.map { stem($0.name) } ?? (reachable ? "metalfit: nothing loaded"
                                                                          : "metalfit is not running")
     }
@@ -281,8 +280,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func quit() { NSApp.terminate(nil) }
 }
 
-let app = NSApplication.shared
-let delegate = App()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)          // menu bar only, no Dock icon
-app.run()
+@main
+enum Main {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = App()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)          // menu bar only, no Dock icon
+        app.run()
+    }
+}

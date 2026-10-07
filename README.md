@@ -111,7 +111,10 @@ request naming a model loads that model, so a chat app can switch without touchi
 answers from the folder whether or not anything is running.
 
 **In the menu bar.** `menubar/build.sh` builds `MetalfitBar.app` (Swift, AppKit only, needs `swiftc`): the
-loaded model's name in the menu bar, and a menu to switch models, unload, and start or stop the server. It
+loaded model's name in the menu bar, and a menu to switch models, unload, and start or stop the server. Its
+mark is a chip filled by a stack of layers, and the fill is the state: every layer when a model is loaded, half
+while one loads, none when the server is up with nothing loaded, a dashed outline when the server is off. The
+app icon is the same mark, drawn by the same code (`menubar/Icon.swift`). It
 only uses the API above, polled every 2 s, so it also follows a server started by hand. Stopping sends
 SIGTERM to whatever listens on the port, which metalfit answers by unloading, so no llama-server stays behind
 with its memory wired. With "Start server when this app opens" and the app in the Login Items, the server
