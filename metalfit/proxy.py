@@ -24,6 +24,29 @@ HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", 
               "proxy-authorization", "proxy-authenticate", "content-length", "host"}
 
 
+def folder_state(models_dir: Path) -> tuple:
+    """A cheap signature of the models folder: every .gguf with its size and mtime.  Reading headers for each
+    model costs real time, so the list is cached - but a cache that only fills at startup is wrong in a tool
+    whose job is managing models: files added or deleted while it runs would never show up, and a chat app
+    would offer models that are gone.
+
+    A file that cannot be read is left out, not allowed to fail the whole signature.  A symlink into the
+    Hugging Face cache whose blob was deleted made every call return the same empty tuple, so nothing that
+    happened in the folder afterwards was noticed and deleted models stayed in the list."""
+    found = []
+    try:
+        files = list(models_dir.rglob("*.gguf"))
+    except OSError:
+        return ()
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        found.append((str(f), st.st_size, int(st.st_mtime)))
+    return tuple(sorted(found))
+
+
 class State:
     """What is loaded, and the models we could load.  Guarded by a lock because a switch takes a minute and
     requests keep arriving during it."""
@@ -62,19 +85,8 @@ class State:
                 print(f"[metalfit] idle for {self.keep_alive / 60:.0f} min, giving the memory back")
                 self.unload()
 
-    def _folder_state(self) -> tuple:
-        """A cheap signature of the models folder: every .gguf with its size and mtime.  Reading headers for
-        each model costs real time, so the list is cached - but a cache that only fills at startup is wrong in
-        a tool whose job is managing models: files added or deleted while it runs would never show up, and a
-        chat app would offer models that are gone."""
-        try:
-            return tuple(sorted((str(f), f.stat().st_size, int(f.stat().st_mtime))
-                                for f in self.models_dir.rglob("*.gguf")))
-        except OSError:
-            return ()
-
     def models(self, rescan: bool = False) -> list[fit.Model]:
-        now = self._folder_state()
+        now = folder_state(self.models_dir)
         if now != self._seen:
             rescan, self._seen = True, now
         if self._models is None or rescan:
@@ -105,6 +117,7 @@ class State:
     def describe(self) -> dict:
         cur = self.engine
         return {
+            "models_dir": str(self.models_dir),
             "working_set_gib": round(self.working_set / fit.GIB, 2),
             "busy": self.busy,
             "keep_alive_s": self.keep_alive,

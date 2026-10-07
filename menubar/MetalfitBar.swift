@@ -3,20 +3,32 @@
 // It talks to `metalfit serve` over its own API (GET /api/status, POST /api/load and /api/unload) and polls
 // every 2 s, so it holds no state of its own and works whether the server was started before or after it.
 // It can also start the server and stop it: the command comes from `defaults write io.github.shruxx.metalfit.bar
-// command -array ...`, else from what build.sh found and wrote into Info.plist.  Stopping sends SIGTERM to
-// whatever listens on the port, which metalfit answers by unloading the model, so llama-server never stays
-// behind holding wired memory.  Build with menubar/build.sh; METALFIT_PORT picks another port than 8099.
+// command -array ...`, else from what build.sh found and wrote into Info.plist, else from the Python, metalfit
+// and llama-server a release build carries in Resources.  Stopping sends SIGTERM to whatever listens on the
+// port, which metalfit answers by unloading the model, so llama-server never stays behind holding wired memory.
+// Build with menubar/build.sh (release/build.sh for the self-contained app); METALFIT_PORT picks another port.
 import AppKit
+import ServiceManagement
 
 let port = ProcessInfo.processInfo.environment["METALFIT_PORT"] ?? "8099"
 let base = URL(string: "http://127.0.0.1:\(port)")!
-let logURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/metalfit.log")
+let home = FileManager.default.homeDirectoryForCurrentUser
+let logURL = home.appendingPathComponent("Library/Logs/metalfit.log")
 let defaults = UserDefaults.standard
 
-/// `metalfit serve ...` as an argument list, `defaults` first, then what build.sh baked in.
+/// `metalfit serve ...` as an argument list: `defaults` first, then what build.sh baked in, then what the app
+/// carries.  The bundled one serves `defaults write ... models <folder>`, else ~/models, made if missing.
 func serverCommand() -> [String] {
     if let c = defaults.stringArray(forKey: "command"), !c.isEmpty { return c }
-    return Bundle.main.object(forInfoDictionaryKey: "MetalfitCommand") as? [String] ?? []
+    if let c = Bundle.main.object(forInfoDictionaryKey: "MetalfitCommand") as? [String], !c.isEmpty { return c }
+    guard let res = Bundle.main.resourceURL else { return [] }
+    let python = res.appendingPathComponent("python/bin/python3").path
+    let llama = res.appendingPathComponent("llama/llama-server").path
+    guard FileManager.default.isExecutableFile(atPath: python) else { return [] }
+    let models = defaults.string(forKey: "models") ?? home.appendingPathComponent("models").path
+    try? FileManager.default.createDirectory(atPath: models, withIntermediateDirectories: true)
+    return [python, "-m", "metalfit", "serve", "--models", models, "--llama-server", llama]
+        + (defaults.stringArray(forKey: "args") ?? [])
 }
 
 /// The process listening on our port, found with lsof - so a server started by hand can be stopped too.
@@ -33,7 +45,7 @@ func listenerPID() -> pid_t? {
     return s.split(separator: "\n").first.flatMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
 }
 
-struct Loaded: Decodable {
+struct Loaded: Decodable, Equatable {
     let name: String
     let path: String
     let n_ctx: Int
@@ -41,7 +53,7 @@ struct Loaded: Decodable {
     let whole: Bool
 }
 
-struct Entry: Decodable {
+struct Entry: Decodable, Equatable {
     let name: String
     let path: String
     let file_gb: Double
@@ -49,6 +61,7 @@ struct Entry: Decodable {
 }
 
 struct Status: Decodable {
+    let models_dir: String?
     let busy: String
     let keep_alive_s: Double
     let idle_s: Int?
@@ -75,6 +88,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var server: Process?          // the server this app started, if it did
     var serverState = ""          // "starting" / "stopping" while that is under way, else ""
     var lastError = ""
+    var menuOpen = false          // an open menu is rebuilt on every poll, so it never shows a stale list
 
     func applicationDidFinishLaunching(_ note: Notification) {
         item.button?.image = menuBarImage(.off)
@@ -108,6 +122,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         p.arguments = Array(cmd.dropFirst())
         var env = ProcessInfo.processInfo.environment
         env["PYTHONUNBUFFERED"] = "1"         // the log should show lines as they happen
+        env["PYTHONDONTWRITEBYTECODE"] = "1"  // a __pycache__ written into the app would break its signature
         p.environment = env
         p.standardOutput = log
         p.standardError = log
@@ -159,9 +174,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.serverState = ""
                 }
                 self.updateTitle()
+                if self.menuOpen, let menu = self.item.menu { self.menuNeedsUpdate(menu) }
             }
         }.resume()
     }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuOpen = true
+        refresh()                 // the list as it is now, not as it was up to 2 s ago
+    }
+
+    func menuDidClose(_ menu: NSMenu) { menuOpen = false }
 
     func post(_ path: String, _ body: [String: Any] = [:]) {
         var req = URLRequest(url: base.appendingPathComponent(path))
@@ -238,12 +261,21 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         un.isEnabled = s.loaded != nil && s.busy.isEmpty
         menu.addItem(un)
         menu.addItem(action("Open metalfit page", #selector(openPage), key: "o"))
+        if let dir = s.models_dir {
+            let mi = action("Open models folder", #selector(openFolder(_:)))
+            mi.representedObject = dir
+            mi.toolTip = dir + " - .gguf files put here appear in this menu within 2 s"
+            menu.addItem(mi)
+        }
         menu.addItem(action("Stop server", #selector(stop)))
         footer(menu)
     }
 
     func footer(_ menu: NSMenu) {
         menu.addItem(.separator())
+        let login = action("Open at login", #selector(toggleLogin))
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(login)
         let auto = action("Start server when this app opens", #selector(toggleAutostart))
         auto.state = defaults.bool(forKey: "autostart") ? .on : .off
         menu.addItem(auto)
@@ -273,10 +305,28 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func start() { startServer() }
     @objc func stop() { stopServer() }
     @objc func toggleAutostart() { defaults.set(!defaults.bool(forKey: "autostart"), forKey: "autostart") }
+    @objc func toggleLogin() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+            lastError = ""
+        } catch {
+            lastError = "login item: \(error.localizedDescription)"
+        }
+        if SMAppService.mainApp.status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()     // macOS wants the user to allow it there
+        }
+    }
     @objc func openLog() {
         if FileManager.default.fileExists(atPath: logURL.path) { NSWorkspace.shared.open(logURL) }
     }
     @objc func openPage() { NSWorkspace.shared.open(base) }
+    @objc func openFolder(_ sender: NSMenuItem) {
+        if let dir = sender.representedObject as? String { NSWorkspace.shared.open(URL(fileURLWithPath: dir)) }
+    }
     @objc func quit() { NSApp.terminate(nil) }
 }
 
