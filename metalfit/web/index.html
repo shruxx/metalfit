@@ -47,6 +47,10 @@
   .tag.bad { background: var(--badbg); color: var(--bad); }
   .facts { color: var(--dim); font-size: 13px; margin-top: 6px; }
   .advice { font-size: 13px; margin-top: 8px; }
+  .speed { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; margin-top: 10px; font-size: 13px;
+    color: var(--dim); }
+  .speed b { color: var(--ink); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .speed .src { font-size: 12px; }
   .actions { margin-top: 12px; display: flex; gap: 8px; align-items: center; }
   select { font: inherit; padding: 6px 8px; border-radius: 7px; border: 1px solid var(--line);
     background: var(--card); color: var(--ink); }
@@ -94,12 +98,28 @@ function badge(m) {
   return ['bad', 'needs a split'];
 }
 
+// what metalfit measured from real replies on this Mac (speeds.py), or a note that it fills in by itself
+function speed(sp) {
+  if (!sp || !(sp.gen || sp.gen_long || sp.prompt))
+    return '<div class="speed">speed: not measured on this Mac yet — it fills in from the replies you get</div>';
+  const part = (v, unit, label) => v ? `<span><b>${v.toFixed(v < 100 ? 1 : 0)}</b> ${unit} ${label}</span>` : '';
+  return `<div class="speed">
+      ${part(sp.gen, 'tok/s', 'writing')}
+      ${part(sp.gen_long, 'tok/s', 'at long context')}
+      ${part(sp.prompt, 'tok/s', 'reading prompts')}
+      <span class="src">measured from ${sp.replies} ${sp.replies === 1 ? 'reply' : 'replies'} on this Mac</span>
+    </div>`;
+}
+
 function render(s) {
   $('#api').textContent = location.origin + '/v1';
   const on = s.loaded;
   $('#who').textContent = s.busy ? s.busy : on ? on.name : 'nothing loaded';
+  const onSpeed = on && s.models.find(m => m.path === on.path)?.speed?.gen;
   $('#meta').textContent = on
-    ? `-c ${on.n_ctx} · ${on.n_gpu_layers} layers on the GPU · Metal working set ${s.working_set_gib} GiB`
+    ? `-c ${on.n_ctx} · ${on.n_gpu_layers} layers on the GPU`
+      + (onSpeed ? ` · writes ${onSpeed.toFixed(1)} tok/s here` : '')
+      + ` · Metal working set ${s.working_set_gib} GiB`
     : `Metal working set ${s.working_set_gib} GiB`;
   $('#stop').hidden = !on;
   $('#stop').disabled = busy;
@@ -128,6 +148,7 @@ function render(s) {
         ${gb(m.hold_gib)} GiB in memory${m.lazy_gb > 0.5 ? ` · ${gb(m.lazy_gb)} GB read from the file` : ''}
         ${m.shards > 1 ? ` · ${m.shards} shards` : ''}</div>
       <div class="advice">${m.advice}</div>
+      ${speed(m.speed)}
       <div class="actions">
         <select>${opts.map(c => `<option value="${c}"${c === m.suggest_ctx ? ' selected' : ''}>-c ${c}</option>`).join('')}</select>
         <button class="go">${live ? 'reload' : 'load'}</button>
